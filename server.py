@@ -92,5 +92,6 @@ async def websocket_endpoint(websocket: WebSocket):
 # === Main entry ===
 
 if __name__ == "__main__":
-        port = int(os.environ.get("PORT", 10000))  # fallback to 10000 if PORT is not set
-        uvicorn.run("server:app", host="0.0.0.0", port=port)
+    port = int(os.environ.get("PORT", 8000))  # fallback to 8000 locally
+    uvicorn.run("server:app", host="0.0.0.0", port=port)
+
