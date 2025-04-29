@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: whisper-tts-app
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn server:app --host 0.0.0.0 --port 8000"
+    region: oregon  # or frankfurt, depending on your location
+    plan: free
+    envVars:
+      - key: PORT
+        value: 8000
