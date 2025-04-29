@@ -1,0 +1,8 @@
+faster-whisper
+TTS
+soundfile
+numpy
+sounddevice
+scipy
+fastapi
+uvicorn
