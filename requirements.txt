@@ -2,6 +2,5 @@ fastapi
 uvicorn
 faster-whisper
 TTS
-soundfile
 numpy
-scipy
+soundfile

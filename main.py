@@ -1,80 +1,65 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, WebSocket
+from fastapi.responses import JSONResponse, FileResponse
 from faster_whisper import WhisperModel
 from TTS.api import TTS
-import numpy as np
 import soundfile as sf
-import os
+import numpy as np
+import tempfile
 import uuid
-import wave
+import os
 
 app = FastAPI()
 
-# Load models
+# Load STT + TTS models once at startup
 whisper_model = WhisperModel("tiny.en", device="cpu")
-tts_model = TTS(model_name="tts_models/en/ljspeech/tacotron2-DDC")
+tts = TTS(model_name="tts_models/en/ljspeech/tacotron2-DDC")
 
-UPLOAD_DIR = "uploads"
-OUTPUT_DIR = "outputs"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# HTTP health check
+@app.get("/")
+def read_root():
+    return {"message": "Whisper + TTS is running on Render"}
 
-# Serve static frontend
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-@app.get("/", response_class=HTMLResponse)
-def home():
-    with open("static/index.html") as f:
-        return HTMLResponse(content=f.read())
-
-@app.get("/download-audio/{filename}")
-def download_audio(filename: str):
-    path = os.path.join(OUTPUT_DIR, filename)
-    if os.path.exists(path):
-        return FileResponse(path, media_type="audio/wav", filename=filename)
-    return JSONResponse(status_code=404, content={"error": "File not found"})
-
-# --- 🧠 WebSocket for Streaming Audio ---
+# WebSocket endpoint
 @app.websocket("/ws/audio")
-async def websocket_audio(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-
-    audio_id = str(uuid.uuid4())
-    raw_audio_path = os.path.join(UPLOAD_DIR, f"{audio_id}.raw")
-    wav_audio_path = os.path.join(UPLOAD_DIR, f"{audio_id}.wav")
-    out_audio_path = os.path.join(OUTPUT_DIR, f"{audio_id}_tts.wav")
-
-    buffer = bytearray()
-    sample_rate = 16000
-    sample_width = 2  # 16-bit PCM
-    channels = 1
-
-    try:
-        while True:
+    
+    audio_data = b""
+    while True:
+        try:
             chunk = await websocket.receive_bytes()
-            buffer.extend(chunk)
+            audio_data += chunk
+        except Exception as e:
+            print("WebSocket error:", e)
+            break
 
-    except WebSocketDisconnect:
-        # Save raw to WAV
-        with wave.open(wav_audio_path, 'wb') as wf:
-            wf.setnchannels(channels)
-            wf.setsampwidth(sample_width)
-            wf.setframerate(sample_rate)
-            wf.writeframes(buffer)
+        # Optional: short silence detector / threshold here to trigger processing
 
-        # Transcribe
-        segments, _ = whisper_model.transcribe(wav_audio_path)
-        transcription = " ".join([seg.text for seg in segments])
+        # Once enough data is received, process
+        if len(audio_data) > 32000:  # ~2 seconds of 16kHz 16-bit mono
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio:
+                sf.write(temp_audio.name, np.frombuffer(audio_data, dtype=np.int16), 16000)
+                transcription = transcribe_audio(temp_audio.name)
+                tts_path = synthesize_tts(transcription)
+                await websocket.send_json({
+                    "transcription": transcription,
+                    "tts_audio_url": f"/tts/{os.path.basename(tts_path)}"
+                })
+                audio_data = b""  # reset buffer
 
-        if not transcription.strip():
-            await websocket.send_json({"error": "No speech detected."})
-            return
+# Serve TTS file
+@app.get("/tts/{filename}")
+async def get_tts(filename: str):
+    return FileResponse(f"tts_audio/{filename}")
 
-        # Generate TTS
-        tts_model.tts_to_file(text=transcription, file_path=out_audio_path)
+# Helper: Transcribe
+def transcribe_audio(filepath: str) -> str:
+    segments, _ = whisper_model.transcribe(filepath)
+    return " ".join([seg.text for seg in segments])
 
-        await websocket.send_json({
-            "transcription": transcription,
-            "tts_audio_url": f"/download-audio/{os.path.basename(out_audio_path)}"
-        })
+# Helper: Synthesize
+def synthesize_tts(text: str) -> str:
+    os.makedirs("tts_audio", exist_ok=True)
+    out_path = f"tts_audio/{uuid.uuid4()}.wav"
+    tts.tts_to_file(text=text, file_path=out_path)
+    return out_path
