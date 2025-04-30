@@ -1,91 +1,80 @@
-# server.py
-
-import os
-import asyncio
-import numpy as np
-import soundfile as sf
-import sounddevice as sd
-import scipy.io.wavfile as wav
-
-from fastapi import FastAPI, WebSocket
-from fastapi.responses import HTMLResponse
-import uvicorn
-
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from faster_whisper import WhisperModel
 from TTS.api import TTS
-
-# === Setup ===
-
-sample_rate = 16000
-reference_wav = "voice_ref.wav"  # Path to your cloned voice reference
-
-# Load models (slow on cold start)
-whisper_model = WhisperModel("tiny.en", device="cpu")
-tts = TTS(model_name="tts_models/multilingual/multi-dataset/your_tts")
-
-# === Helper Functions ===
-
-def save_audio_from_bytes(raw_audio_bytes, filename="recording.wav"):
-    audio_np = np.frombuffer(raw_audio_bytes, dtype=np.int16)
-    wav.write(filename, sample_rate, audio_np)
-    return filename
-
-def transcribe_audio(filename):
-    print("🧠 Transcribing...")
-    try:
-        segments, _ = whisper_model.transcribe(filename)
-        text = " ".join([segment.text for segment in segments])
-        print("📝 Transcribed:", text)
-        return text
-    except Exception as e:
-        print(f"❌ Transcription error: {e}")
-        return ""
-
-def speak_text(text, output_file="tts_output.wav"):
-    print("🧬 Generating cloned voice...")
-    try:
-        tts.tts_to_file(text=text, file_path=output_file, speaker_wav=reference_wav, language="en")
-        data, samplerate = sf.read(output_file)
-        print("▶️ Playing audio...")
-        sd.play(data, samplerate)
-        sd.wait()
-    except Exception as e:
-        print(f"❌ TTS error: {e}")
-
-# === FastAPI App ===
+import numpy as np
+import soundfile as sf
+import os
+import uuid
+import wave
 
 app = FastAPI()
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+# Load models
+whisper_model = WhisperModel("tiny.en", device="cpu")
+tts_model = TTS(model_name="tts_models/en/ljspeech/tacotron2-DDC")
+
+UPLOAD_DIR = "uploads"
+OUTPUT_DIR = "outputs"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Serve static frontend
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    with open("static/index.html") as f:
+        return HTMLResponse(content=f.read())
+
+@app.get("/download-audio/{filename}")
+def download_audio(filename: str):
+    path = os.path.join(OUTPUT_DIR, filename)
+    if os.path.exists(path):
+        return FileResponse(path, media_type="audio/wav", filename=filename)
+    return JSONResponse(status_code=404, content={"error": "File not found"})
+
+# --- 🧠 WebSocket for Streaming Audio ---
+@app.websocket("/ws/audio")
+async def websocket_audio(websocket: WebSocket):
     await websocket.accept()
-    print("✅ WebSocket Connected!")
+
+    audio_id = str(uuid.uuid4())
+    raw_audio_path = os.path.join(UPLOAD_DIR, f"{audio_id}.raw")
+    wav_audio_path = os.path.join(UPLOAD_DIR, f"{audio_id}.wav")
+    out_audio_path = os.path.join(OUTPUT_DIR, f"{audio_id}_tts.wav")
+
+    buffer = bytearray()
+    sample_rate = 16000
+    sample_width = 2  # 16-bit PCM
+    channels = 1
 
     try:
         while True:
-            data = await websocket.receive_bytes()
-            print(f"🎤 Received {len(data)} bytes of audio")
+            chunk = await websocket.receive_bytes()
+            buffer.extend(chunk)
 
-            audio_file = save_audio_from_bytes(data)
-            transcribed_text = transcribe_audio(audio_file)
+    except WebSocketDisconnect:
+        # Save raw to WAV
+        with wave.open(wav_audio_path, 'wb') as wf:
+            wf.setnchannels(channels)
+            wf.setsampwidth(sample_width)
+            wf.setframerate(sample_rate)
+            wf.writeframes(buffer)
 
-            if transcribed_text.strip():
-                speak_text(transcribed_text)
-            else:
-                print("🤐 No clear speech detected.")
+        # Transcribe
+        segments, _ = whisper_model.transcribe(wav_audio_path)
+        transcription = " ".join([seg.text for seg in segments])
 
-            await websocket.send_text("✅ Audio processed")
-            await asyncio.sleep(0.1)
+        if not transcription.strip():
+            await websocket.send_json({"error": "No speech detected."})
+            return
 
-    except Exception as e:
-        print(f"❌ WebSocket error: {e}")
-    finally:
-        await websocket.close()
-        print("🔌 WebSocket Disconnected.")
+        # Generate TTS
+        tts_model.tts_to_file(text=transcription, file_path=out_audio_path)
 
-# === Entry Point ===
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    print(f"🚀 Starting server on 0.0.0.0:{port}")
-    uvicorn.run("server:app", host="0.0.0.0", port=port)
+        await websocket.send_json({
+            "transcription": transcription,
+            "tts_audio_url": f"/download-audio/{os.path.basename(out_audio_path)}"
+        })
