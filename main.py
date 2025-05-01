@@ -8,37 +8,33 @@ import uvicorn
 import tempfile
 import uuid
 import os
-import asyncio
 
 app = FastAPI()
 
 whisper_model = None
 tts = None
 
-@app.on_event("startup")
-async def start_background_tasks():
-    asyncio.create_task(load_models())
-
-async def load_models():
+def load_models():
     global whisper_model, tts
-    print("Loading models in background...")
-    whisper_model = WhisperModel("tiny.en", device="cpu")
-    tts = TTS(model_name="tts_models/en/ljspeech/tacotron2-DDC")
-    print("Models loaded.")
+    if whisper_model is None:
+        print("Loading Whisper...")
+        whisper_model = WhisperModel("tiny.en", device="cpu")
+        print("Whisper loaded.")
+    if tts is None:
+        print("Loading TTS...")
+        tts = TTS(model_name="tts_models/en/ljspeech/tacotron2-DDC")
+        print("TTS loaded.")
 
 @app.get("/")
 def read_root():
-    if whisper_model is None or tts is None:
-        return {"status": "starting", "message": "Models are still loading..."}
+    load_models()
     return {"status": "ready", "message": "Whisper + TTS is ready."}
 
 @app.websocket("/ws/audio")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    if whisper_model is None or tts is None:
-        await websocket.send_text("Models are still loading, please wait.")
-        await websocket.close()
-        return
+
+    load_models()  # Load models if not already
 
     audio_data = b""
     while True:
