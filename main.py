@@ -4,6 +4,7 @@ from faster_whisper import WhisperModel
 from TTS.api import TTS
 import soundfile as sf
 import numpy as np
+import uvicorn
 import tempfile
 import uuid
 import os
@@ -71,6 +72,5 @@ def synthesize_tts(text: str) -> str:
 
 # Entry point: Render binds to this when deploying
 if __name__ == "__main__":
-    import uvicorn
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
