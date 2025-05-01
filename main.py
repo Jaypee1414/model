@@ -11,30 +11,38 @@ import os
 
 app = FastAPI()
 
+# Global model variables
 whisper_model = None
 tts = None
 
-def load_models():
+# === SYNC MODEL LOADING DURING STARTUP ===
+@app.on_event("startup")
+async def load_models():
     global whisper_model, tts
-    if whisper_model is None:
-        print("Loading Whisper...")
-        whisper_model = WhisperModel("tiny.en", device="cpu")
-        print("Whisper loaded.")
-    if tts is None:
-        print("Loading TTS...")
-        tts = TTS(model_name="tts_models/en/ljspeech/tacotron2-DDC")
-        print("TTS loaded.")
+    print("Loading Whisper and TTS models...")
+    whisper_model = WhisperModel("tiny.en", device="cpu")  # lightweight
+    tts = TTS(model_name="tts_models/en/ljspeech/tacotron2-DDC")  # could be swapped if too slow
+    print("Models loaded successfully.")
 
+# === HEALTH CHECK ===
 @app.get("/")
 def read_root():
-    load_models()
+    if whisper_model is None or tts is None:
+        return {"status": "starting", "message": "Models are still loading..."}
     return {"status": "ready", "message": "Whisper + TTS is ready."}
 
+@app.get("/health")
+def health_check():
+    return {"ok": whisper_model is not None and tts is not None}
+
+# === WEBSOCKET ENDPOINT ===
 @app.websocket("/ws/audio")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-
-    load_models()  # Load models if not already
+    if whisper_model is None or tts is None:
+        await websocket.send_text("Models are still loading, please wait.")
+        await websocket.close()
+        return
 
     audio_data = b""
     while True:
@@ -56,6 +64,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
                 audio_data = b""
 
+# === AUDIO FILE RETURN ===
 @app.get("/tts/{filename}")
 async def get_tts(filename: str):
     file_path = f"tts_audio/{filename}"
@@ -63,16 +72,19 @@ async def get_tts(filename: str):
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(file_path)
 
+# === WHISPER TRANSCRIPTION ===
 def transcribe_audio(filepath: str) -> str:
     segments, _ = whisper_model.transcribe(filepath)
     return " ".join([seg.text for seg in segments])
 
+# === TTS SYNTHESIS ===
 def synthesize_tts(text: str) -> str:
     os.makedirs("tts_audio", exist_ok=True)
     out_path = f"tts_audio/{uuid.uuid4()}.wav"
     tts.tts_to_file(text=text, file_path=out_path)
     return out_path
 
+# === ENTRY POINT ===
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 10000))  # Render sets this env var
     uvicorn.run("main:app", host="0.0.0.0", port=port)
