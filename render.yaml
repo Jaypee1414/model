@@ -2,8 +2,10 @@ services:
   - type: web
     name: whisper-tts-api
     env: python
+    plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    startCommand: uvicorn main:app --host 0.0.0.0 --port=${PORT:-10000}
+    autoDeploy: true
     envVars:
       - key: PORT
         value: 10000
