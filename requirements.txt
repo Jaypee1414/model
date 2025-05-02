@@ -1,5 +1,6 @@
 fastapi
 uvicorn
+gunicorn
 faster-whisper
 TTS
 soundfile
